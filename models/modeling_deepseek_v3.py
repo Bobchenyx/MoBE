@@ -12,16 +12,16 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from ...activations import ACT2FN
-from ...cache_utils import Cache, DynamicCache, StaticCache
-from ...generation import GenerationMixin
-from ...modeling_attn_mask_utils import AttentionMaskConverter
-from ...modeling_flash_attention_utils import FlashAttentionKwargs
-from ...modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
-from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
-from ...processing_utils import Unpack
-from ...utils import (
+from transformers.activations import ACT2FN
+from transformers.cache_utils import Cache, DynamicCache, StaticCache
+from transformers.generation import GenerationMixin
+from transformers.modeling_attn_mask_utils import AttentionMaskConverter
+from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
+from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from transformers.processing_utils import Unpack
+from transformers.utils import (
     LossKwargs,
     add_start_docstrings,
     add_start_docstrings_to_model_forward,
@@ -30,14 +30,14 @@ from ...utils import (
     logging,
     replace_return_docstrings,
 )
-from ...utils.deprecation import deprecate_kwarg
-from .configuration_deepseek_v3 import DeepseekV3Config
+from transformers.utils.deprecation import deprecate_kwarg
+from transformers.models.deepseek_v3.configuration_deepseek_v3 import DeepseekV3Config
 
 
 if is_torch_flex_attn_available():
     from torch.nn.attention.flex_attention import BlockMask
 
-    from ...integrations.flex_attention import make_flex_block_causal_mask
+    from transformers.integrations.flex_attention import make_flex_block_causal_mask
 
 
 logger = logging.get_logger(__name__)
@@ -97,14 +97,12 @@ class DeepseekV3RotaryEmbedding(nn.Module):
 
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
-
 class DeepseekV3MLP(nn.Module):
     def __init__(self, config, hidden_size=None, intermediate_size=None):
         super().__init__()
         self.config = config
-        self.hidden_size = config.hidden_size if hidden_size is None else hidden_size
-        self.intermediate_size = config.intermediate_size if intermediate_size is None else intermediate_size
-
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = intermediate_size if intermediate_size is not None else config.intermediate_size
         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
@@ -112,6 +110,22 @@ class DeepseekV3MLP(nn.Module):
 
     def forward(self, x):
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        return down_proj
+
+
+class DeepseekV3MoBEMLP(nn.Module):
+    def __init__(self, config, hidden_size=None, intermediate_size=None):
+        super().__init__()
+        self.config = config
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = intermediate_size if intermediate_size is not None else config.intermediate_size
+        self.gate_proj = nn.Linear(self.intermediate_size, self.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(self.intermediate_size, self.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+        self.act_fn = ACT2FN[config.hidden_act]
+
+    def forward(self, x, B_gate, B_up):
+        down_proj = self.down_proj(self.act_fn(self.gate_proj(F.linear(x, B_gate))) * self.up_proj(F.linear(x, B_up)))
         return down_proj
 
 
@@ -162,7 +176,7 @@ class DeepseekV3TopkRouter(nn.Module):
         return topk_indices, topk_weights
 
 
-class DeepseekV3MoE(nn.Module):
+class DeepseekV3MoBE(nn.Module):
     """
     A mixed expert module containing shared experts.
     """
@@ -170,9 +184,10 @@ class DeepseekV3MoE(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        self.num_B = config.num_B
         self.experts = nn.ModuleList(
             [
-                DeepseekV3MLP(config, intermediate_size=config.moe_intermediate_size)
+                DeepseekV3MoBEMLP(config, intermediate_size=config.moe_intermediate_size)
                 for _ in range(config.n_routed_experts)
             ]
         )
@@ -180,6 +195,20 @@ class DeepseekV3MoE(nn.Module):
         self.shared_experts = DeepseekV3MLP(
             config=config, intermediate_size=config.moe_intermediate_size * config.n_shared_experts
         )
+
+        self.B_up = nn.Parameter(torch.zeros(config.num_B, config.moe_intermediate_size, config.hidden_size))
+        self.W_up = nn.Parameter(torch.zeros(config.n_routed_experts, config.num_B))
+
+        self.B_gate = nn.Parameter(torch.zeros(config.num_B, config.moe_intermediate_size, config.hidden_size))
+        self.W_gate = nn.Parameter(torch.zeros(config.n_routed_experts, config.num_B))
+        self.num_experts = config.n_routed_experts
+        self.moe_intermediate_size = config.moe_intermediate_size
+        self.hidden_size = config.hidden_size
+
+        if config.activation == 'tanh':
+            self.activation = nn.Tanh()
+        else:
+            self.activation = nn.SiLU()
 
     def moe(self, hidden_states: torch.Tensor, topk_indices: torch.Tensor, topk_weights: torch.Tensor):
         r"""
@@ -190,6 +219,10 @@ class DeepseekV3MoE(nn.Module):
         expert_mask = torch.nn.functional.one_hot(topk_indices, num_classes=len(self.experts))
         expert_mask = expert_mask.permute(2, 0, 1)
 
+        B_gate = self.activation(torch.matmul(self.W_gate, self.B_gate.view(self.num_B, -1))).view(self.num_experts, self.moe_intermediate_size, self.hidden_size)
+        B_up = self.activation(torch.matmul(self.W_up, self.B_up.view(self.num_B, -1))).view(self.num_experts, self.moe_intermediate_size, self.hidden_size)
+
+
         for expert_idx in range(len(self.experts)):
             expert = self.experts[expert_idx]
             mask = expert_mask[expert_idx]
@@ -198,7 +231,7 @@ class DeepseekV3MoE(nn.Module):
             if token_indices.numel() > 0:
                 expert_weights = topk_weights[token_indices, weight_indices]
                 expert_input = hidden_states[token_indices]
-                expert_output = expert(expert_input)
+                expert_output = expert(expert_input, B_gate[expert_idx], B_up[expert_idx])
                 weighted_output = expert_output * expert_weights.unsqueeze(-1)
                 final_hidden_states.index_add_(0, token_indices, weighted_output)
 
@@ -461,7 +494,7 @@ class DeepseekV3DecoderLayer(nn.Module):
         self.self_attn = DeepseekV3Attention(config=config, layer_idx=layer_idx)
 
         if layer_idx >= config.first_k_dense_replace:
-            self.mlp = DeepseekV3MoE(config)
+            self.mlp = DeepseekV3MoBE(config)
         else:
             self.mlp = DeepseekV3MLP(config)
 
@@ -516,9 +549,6 @@ DEEPSEEK_V3_START_DOCSTRING = r"""
     library implements for all its model (such as downloading or saving, resizing the input embeddings, pruning heads
     etc.)
 
-    This model is also a PyTorch [torch.nn.Module](https://pytorch.org/docs/stable/nn.html#torch.nn.Module) subclass.
-    Use it as a regular PyTorch Module and refer to the PyTorch documentation for all matter related to general usage
-    and behavior.
 
     Parameters:
         config ([`DeepseekV3Config`]):
@@ -586,9 +616,6 @@ DEEPSEEK_V3_INPUTS_DOCSTRING = r"""
             If `past_key_values` is used, optionally only the last `input_ids` have to be input (see
             `past_key_values`).
 
-            If you want to change padding behavior, you should read [`modeling_opt._prepare_decoder_attention_mask`]
-            and modify to your needs. See diagram 1 in [the paper](https://arxiv.org/abs/1910.13461) for more
-            information on the default strategy.
 
             - 1 indicates the head is **not masked**,
             - 0 indicates the head is **masked**.
@@ -601,8 +628,6 @@ DEEPSEEK_V3_INPUTS_DOCSTRING = r"""
             Pre-computed hidden-states (key and values in the self-attention blocks and in the cross-attention
             blocks) that can be used to speed up sequential decoding. This typically consists in the `past_key_values`
             returned by the model at a previous stage of decoding, when `use_cache=True` or `config.use_cache=True`.
-
-            It is a [`~cache_utils.Cache`] instance. For more details, see our [kv cache guide](https://huggingface.co/docs/transformers/en/kv_cache).
 
             If `past_key_values` are used, the user can optionally input only the last `input_ids` (those that don't
             have their past key value states given to this model) of shape `(batch_size, 1)` instead of all `input_ids`
@@ -838,7 +863,6 @@ class DeepseekV3Model(DeepseekV3PreTrainedModel):
         ):
             # Attend to all tokens in fully masked rows in the causal_mask, for example the relevant first rows when
             # using left padding. This is required by F.scaled_dot_product_attention memory-efficient attention path.
-            # Details: https://github.com/pytorch/pytorch/issues/110213
             min_dtype = torch.finfo(dtype).min
             causal_mask = AttentionMaskConverter._unmask_unattended(causal_mask, min_dtype)
 
@@ -906,7 +930,7 @@ class DeepseekV3Model(DeepseekV3PreTrainedModel):
 class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
 
 
-class DeepseekV3ForCausalLM(DeepseekV3PreTrainedModel, GenerationMixin):
+class DeepseekV3MoBEForCausalLM(DeepseekV3PreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
     _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}
