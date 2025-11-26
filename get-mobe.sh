@@ -1,11 +1,11 @@
-# MODEL_DIR=/home/user1/workspace/bobchenyx/Qwen
-MODEL_DIR=/shared/user67/workspace/bobchenyx/Qwen
+MODEL_DIR=/home/user1/workspace/bobchenyx/Qwen
+# MODEL_DIR=/shared/user67/workspace/bobchenyx/Qwen
 MODEL_NAME=Qwen3-30B-A3B-Instruct-2507
 
 python -u get_mobe.py --base_model $MODEL_DIR/$MODEL_NAME \
       --mobe_dir $MODEL_DIR/MoBE/$MODEL_NAME \
       --save_dir $MODEL_DIR/MoBE/$MODEL_NAME-MoBE \
-      --num_B 64 \
+      --num_B 32 \
       --num_experts 128 \
       --start_layer 0 \
       --end_layer 48 \
