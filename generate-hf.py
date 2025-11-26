@@ -1,12 +1,12 @@
 import transformers
 import torch
 
-model_id = "../Qwen/MoBE/Qwen3-30B-A3B-Instruct-2507-MoBE-hf"
+model_id = "../Qwen/MoBE-32/Qwen3-30B-A3B-Instruct-2507-MoBE-hf"
 pipeline = transformers.pipeline(
     "text-generation",
     model=model_id,
-    model_kwargs={"dtype": torch.bfloat16},
-    device_map="auto",
+    torch_dtype=torch.bfloat16,
+    device_map="cuda:0",
 )
 
 messages = [
