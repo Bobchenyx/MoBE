@@ -22,7 +22,7 @@ if 'Qwen' in model_name:
     		device_map="auto",
     		offload_folder=offload_folder,
     		offload_state_dict=True,
-    		torch_dtype=torch.bfloat16,
+    		load_in_8bit=True,# torch_dtype=torch.bfloat16,
         max_memory=max_memory
     )
 elif 'DeepSeek' in model_name:
