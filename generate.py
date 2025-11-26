@@ -12,13 +12,14 @@ offload_folder = "./offload_dir"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 tokenizer.pad_token = tokenizer.eos_token
 
-max_memory = {i: "90GiB" for i in range(1)}  
+max_memory = {i: "40GiB" for i in range(1)}  
+# max_memory = {i: "90GiB" for i in range(1)}  
 max_memory["cpu"] = "400GiB"      
 
 if 'Qwen' in model_name:
     model = Qwen3MoBEForCausalLM.from_pretrained(
     		model_name,
-    		device_map="cuda:0",
+    		device_map="auto",
     		offload_folder=offload_folder,
     		offload_state_dict=True,
     		torch_dtype=torch.bfloat16,
