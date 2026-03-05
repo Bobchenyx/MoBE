@@ -1,3 +1,16 @@
+"""
+Group-wise MoBE training script.
+
+Divides experts into multiple groups and trains MoBE decomposition independently
+per group, reducing memory usage for models with a very large number of experts.
+Output files are saved per-group: *_group{g}_WAB.pth
+
+Note: The default argument values (384 experts, 61 layers, etc.) are example
+configurations and should be adjusted to match your target model.
+The `if g == 0: continue` on line ~107 is a debug artifact for resuming
+interrupted training — remove or adjust as needed.
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -104,7 +117,7 @@ def main():
         global_target_std = full_target.std()
 
         for g in range(args.num_groups):
-            if g == 0: ####OOM
+            if g == 0:  # TODO: debug artifact for resuming — remove or adjust for fresh training
                 continue
             print(f'---- group {g+1}/{args.num_groups} ----')
             g_start = g * num_matrices_group

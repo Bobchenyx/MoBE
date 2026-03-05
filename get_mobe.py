@@ -3,10 +3,7 @@ import json
 import torch
 from tqdm import tqdm
 from transformers import AutoConfig, AutoTokenizer
-from models.modeling_deepseek_v3_mobe import DeepseekV3MoBEForCausalLM 
 from models.modeling_qwen3_mobe import Qwen3MoBEForCausalLM
-from models.modeling_kimi_k2_mobe import KimiK2MoBEForCausalLM
-from models.modeling_bailing_mobe import BailingMoBEForCausalLM
 from safetensors import safe_open
 from safetensors.torch import load_file as torch_load_file
 import argparse
@@ -76,32 +73,8 @@ def main(args):
             device_map='auto',
             torch_dtype=dtype
         )
-    elif "DeepSeek" in args.base_model:
-        model = DeepseekV3MoBEForCausalLM.from_pretrained(
-            args.base_model,
-            ignore_mismatched_sizes=True,
-            config=config,
-            device_map='auto',
-            torch_dtype=dtype
-        )
-    elif "Kimi" in args.base_model:
-        model = KimiK2MoBEForCausalLM.from_pretrained(
-            args.base_model,
-            ignore_mismatched_sizes=True,
-            config=config,
-            torch_dtype=dtype,
-            device_map='auto',
-            trust_remote_code=True
-        )
-    elif "Ling" in args.base_model:
-        model = BailingMoBEForCausalLM.from_pretrained(
-            args.base_model,
-            ignore_mismatched_sizes=True,
-            config=config,
-            torch_dtype=dtype,
-            device_map='auto',
-            trust_remote_code=True
-        )
+    else:
+        raise ValueError(f"Unsupported model: {args.base_model}. Currently only Qwen3 is supported.")
 
     state_dict = model.state_dict()
 

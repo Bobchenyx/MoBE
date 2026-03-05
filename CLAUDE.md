@@ -8,10 +8,7 @@ MoBE (Mixture-of-Basis-Experts) is a research implementation for compressing MoE
 
 ## Supported Models
 
-- **DeepSeek-V3** (671B, 256 experts/layer)
 - **Qwen3-MoE** (235B)
-- **Kimi-K2-Instruct** (1T, 384 experts/layer) — uses grouped training
-- **BailingMoE** (Ant Group's model)
 
 ## Commands
 
@@ -23,7 +20,8 @@ pip install -r requirements.txt
 ### Train MoBE decomposition (standard)
 ```bash
 python train.py \
-  --model_path <path_to_model> \
+  --index_path <path_to_index_json> \
+  --base_dir <model_shard_dir> \
   --save_path <output_dir> \
   --num_B <num_basis_matrices> \
   --truncation <max_rows_per_basis> \
@@ -31,10 +29,11 @@ python train.py \
   --num_epochs 10000 --learning_rate 0.07
 ```
 
-### Train MoBE decomposition (grouped, for large models like Kimi-K2)
+### Train MoBE decomposition (grouped, for models with many experts)
 ```bash
 python train_group.py \
-  --model_path <path_to_model> \
+  --index_path <path_to_index_json> \
+  --base_dir <model_shard_dir> \
   --save_path <output_dir> \
   --num_B <num_basis_matrices> \
   --truncation <max_rows_per_basis> \
@@ -44,12 +43,12 @@ python train_group.py \
 
 ### Generate compressed model (native MoBE format)
 ```bash
-python get_mobe.py --model_path <base_model> --save_path <output> --mobe_path <trained_params>
+python get_mobe.py --base_model <base_model> --mobe_dir <trained_params> --save_dir <output>
 ```
 
 ### Generate HuggingFace-compatible model (reconstructed MoE)
 ```bash
-python get_hf_model.py --model_path <base_model> --save_path <output> --mobe_path <trained_params>
+python get_hf_model.py --base_model <base_model> --mobe_dir <trained_params> --save_dir <output>
 ```
 
 ## Architecture
@@ -69,7 +68,7 @@ python get_hf_model.py --model_path <base_model> --save_path <output> --mobe_pat
 - For grouped training: `*_group{g}_WAB.pth`
 
 ### train_group.py vs train.py
-`train_group.py` divides experts into groups (e.g., 2 for Kimi-K2's 384 experts) and trains MoBE independently per group. Use for models too large for single-batch training.
+`train_group.py` divides experts into groups and trains MoBE independently per group. Use for models with many experts where single-batch training causes OOM.
 
 ## Key Dependencies
 
@@ -79,4 +78,4 @@ PyTorch, HuggingFace Transformers, Accelerate, SafeTensors. See `requirements.tx
 
 - No automated tests — verification is done via benchmark accuracy evaluation.
 - Memory-sensitive: code uses explicit `gc.collect()` and `torch.cuda.empty_cache()` between layers.
-- Model type detection in `get_mobe.py`/`get_hf_model.py` is name-based (checks for "deepseek", "qwen", "kimi", "bailing" in the model path).
+- Model type detection in `get_mobe.py` is name-based (checks for "Qwen3" in the model path). New models can be added as `elif` branches.
